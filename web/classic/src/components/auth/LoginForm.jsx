@@ -112,6 +112,7 @@ const LoginForm = () => {
   const githubTimeoutRef = useRef(null);
   const githubButtonText = t(githubButtonTextKeyByState[githubButtonState]);
   const [customOAuthLoading, setCustomOAuthLoading] = useState({});
+  const autoOIDCStartedRef = useRef(false);
 
   const logo = getLogo();
   const systemName = getSystemName();
@@ -171,6 +172,41 @@ const LoginForm = () => {
       showError(t('未登录或登录已过期，请重新登录'));
     }
   }, []);
+
+  useEffect(() => {
+    const autoOIDC =
+      searchParams.get('auto_oidc') === '1' ||
+      searchParams.get('auto_oidc') === 'true';
+    if (
+      !autoOIDC ||
+      autoOIDCStartedRef.current ||
+      !status.oidc_enabled ||
+      !status.oidc_authorization_endpoint ||
+      !status.oidc_client_id ||
+      ((hasUserAgreement || hasPrivacyPolicy) && !agreedToTerms)
+    ) {
+      return;
+    }
+
+    autoOIDCStartedRef.current = true;
+    setOidcLoading(true);
+    onOIDCClicked(
+      status.oidc_authorization_endpoint,
+      status.oidc_client_id,
+      false,
+      { shouldLogout: true },
+    ).finally(() => {
+      setTimeout(() => setOidcLoading(false), 3000);
+    });
+  }, [
+    agreedToTerms,
+    hasPrivacyPolicy,
+    hasUserAgreement,
+    searchParams,
+    status.oidc_authorization_endpoint,
+    status.oidc_client_id,
+    status.oidc_enabled,
+  ]);
 
   const onWeChatLoginClicked = () => {
     if ((hasUserAgreement || hasPrivacyPolicy) && !agreedToTerms) {

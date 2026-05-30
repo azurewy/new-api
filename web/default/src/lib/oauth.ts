@@ -86,7 +86,7 @@ export async function getOAuthState(): Promise<string | null> {
     }
     const res = await api.get(path)
     if (res.data.success) {
-      return res.data.data
+      return normalizeOAuthState(res.data.data)
     }
     return null
   } catch (error) {
@@ -94,6 +94,13 @@ export async function getOAuthState(): Promise<string | null> {
     console.error('Failed to get OAuth state:', error)
     return null
   }
+}
+
+function normalizeOAuthState(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  const state = value.trim()
+  if (!state || state === 'null' || state === 'undefined') return null
+  return state
 }
 
 /**

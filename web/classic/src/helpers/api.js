@@ -249,11 +249,18 @@ export async function getOAuthState() {
   const res = await API.get(path);
   const { success, message, data } = res.data;
   if (success) {
-    return data;
+    return normalizeOAuthState(data);
   } else {
     showError(message);
     return '';
   }
+}
+
+function normalizeOAuthState(value) {
+  if (typeof value !== 'string') return '';
+  const state = value.trim();
+  if (!state || state === 'null' || state === 'undefined') return '';
+  return state;
 }
 
 async function prepareOAuthState(options = {}) {

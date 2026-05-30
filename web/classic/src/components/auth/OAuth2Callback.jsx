@@ -89,12 +89,17 @@ const OAuth2Callback = (props) => {
     hasExecuted.current = true;
 
     const code = searchParams.get('code');
-    const state = searchParams.get('state');
+    const state = normalizeOAuthState(searchParams.get('state'));
 
     // 参数缺失直接返回
     if (!code) {
       showError(t('未获取到授权码'));
       navigate('/console/personal');
+      return;
+    }
+    if (!state) {
+      showError(t('授权状态无效，请重新登录'));
+      navigate('/login');
       return;
     }
 
@@ -103,5 +108,12 @@ const OAuth2Callback = (props) => {
 
   return <Loading />;
 };
+
+function normalizeOAuthState(value) {
+  if (typeof value !== 'string') return '';
+  const state = value.trim();
+  if (!state || state === 'null' || state === 'undefined') return '';
+  return state;
+}
 
 export default OAuth2Callback;

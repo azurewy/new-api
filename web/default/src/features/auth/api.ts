@@ -89,8 +89,15 @@ export async function getOAuthState(): Promise<string> {
   const aff =
     typeof window !== 'undefined' ? (localStorage.getItem('aff') ?? '') : ''
   const res = await api.get('/api/oauth/state', { params: { aff } })
-  if (res.data?.success) return res.data.data
+  if (res.data?.success) return normalizeOAuthState(res.data.data)
   return ''
+}
+
+function normalizeOAuthState(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const state = value.trim()
+  if (!state || state === 'null' || state === 'undefined') return ''
+  return state
 }
 
 // WeChat login by authorization code
