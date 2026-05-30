@@ -3,12 +3,15 @@ package controller
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/oauth"
+	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -38,6 +41,49 @@ func GenerateOAuthCode(c *gin.Context) {
 		"message": "",
 		"data":    state,
 	})
+}
+
+// StartOIDCLogin starts a first-party OIDC login flow without requiring frontend JavaScript.
+func StartOIDCLogin(c *gin.Context) {
+	settings := system_setting.GetOIDCSettings()
+	if !settings.Enabled || strings.TrimSpace(settings.ClientId) == "" || strings.TrimSpace(settings.AuthorizationEndpoint) == "" {
+		common.ApiErrorMsg(c, "OIDC login is not configured")
+		return
+	}
+
+	serverAddress := strings.TrimRight(strings.TrimSpace(system_setting.ServerAddress), "/")
+	if serverAddress == "" {
+		common.ApiErrorMsg(c, "server address is not configured")
+		return
+	}
+
+	session := sessions.Default(c)
+	session.Clear()
+	state := common.GetRandomString(12)
+	affCode := c.Query("aff")
+	if affCode != "" {
+		session.Set("aff", affCode)
+	}
+	session.Set("oauth_state", state)
+	if err := session.Save(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+
+	authURL, err := url.Parse(settings.AuthorizationEndpoint)
+	if err != nil || authURL.Scheme == "" || authURL.Host == "" {
+		common.ApiErrorMsg(c, "OIDC authorization endpoint is invalid")
+		return
+	}
+	values := authURL.Query()
+	values.Set("client_id", settings.ClientId)
+	values.Set("redirect_uri", serverAddress+"/oauth/oidc")
+	values.Set("response_type", "code")
+	values.Set("scope", "openid profile email")
+	values.Set("state", state)
+	authURL.RawQuery = values.Encode()
+
+	c.Redirect(http.StatusFound, authURL.String())
 }
 
 // HandleOAuth handles OAuth callback for all standard OAuth providers
