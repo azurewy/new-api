@@ -64,6 +64,7 @@ import type { AuthFormProps } from '@/features/auth/types'
 export function UserAuthForm({
   className,
   redirectTo,
+  autoOIDC = false,
   ...props
 }: AuthFormProps) {
   const { t } = useTranslation()
@@ -319,6 +320,7 @@ export function UserAuthForm({
       <OAuthProviders
         status={status}
         disabled={isLoading || (requiresLegalConsent && !agreedToLegal)}
+        autoStartOIDC={autoOIDC}
         onWeChatLogin={hasWeChatLogin ? handleOpenWeChatDialog : undefined}
         isWeChatLoading={isWeChatSubmitting}
       />

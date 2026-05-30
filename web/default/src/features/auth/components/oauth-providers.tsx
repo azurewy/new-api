@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ReactNode } from 'react'
+import { useEffect, useRef, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   IconDiscord,
@@ -32,6 +32,7 @@ import type { SystemStatus } from '../types'
 type OAuthProvidersProps = {
   status: SystemStatus | null
   disabled?: boolean
+  autoStartOIDC?: boolean
   className?: string
   onWeChatLogin?: () => void
   isWeChatLoading?: boolean
@@ -48,6 +49,7 @@ type ProviderButton = {
 export function OAuthProviders({
   status,
   disabled = false,
+  autoStartOIDC = false,
   className,
   onWeChatLogin,
   isWeChatLoading = false,
@@ -64,6 +66,30 @@ export function OAuthProviders({
     handleTelegramLogin,
     handleCustomOAuthLogin,
   } = useOAuthLogin(status)
+  const autoStartedOIDCRef = useRef(false)
+
+  useEffect(() => {
+    if (
+      !autoStartOIDC ||
+      autoStartedOIDCRef.current ||
+      disabled ||
+      !status?.oidc_enabled ||
+      !status?.oidc_authorization_endpoint ||
+      !status?.oidc_client_id
+    ) {
+      return
+    }
+
+    autoStartedOIDCRef.current = true
+    void handleOIDCLogin()
+  }, [
+    autoStartOIDC,
+    disabled,
+    handleOIDCLogin,
+    status?.oidc_authorization_endpoint,
+    status?.oidc_client_id,
+    status?.oidc_enabled,
+  ])
 
   const providerButtons: ProviderButton[] = []
 

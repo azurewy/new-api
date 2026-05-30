@@ -25,8 +25,9 @@ import { UserAuthForm } from './components/user-auth-form'
 
 export function SignIn() {
   const { t } = useTranslation()
-  const { redirect } = useSearch({ from: '/(auth)/sign-in' })
+  const { redirect, auto_oidc } = useSearch({ from: '/(auth)/sign-in' })
   const { status } = useStatus()
+  const autoOIDC = auto_oidc === '1' || auto_oidc === 'true'
 
   return (
     <AuthLayout>
@@ -50,7 +51,7 @@ export function SignIn() {
             )}
         </div>
 
-        <UserAuthForm redirectTo={redirect} />
+        <UserAuthForm redirectTo={redirect} autoOIDC={autoOIDC} />
 
         <TermsFooter
           variant='sign-in'
