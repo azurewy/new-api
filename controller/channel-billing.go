@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -121,6 +122,18 @@ type OpenRouterCreditResponse struct {
 	} `json:"data"`
 }
 
+type CompatibleUsageBalanceResponse struct {
+	Remaining any    `json:"remaining"`
+	Balance   any    `json:"balance"`
+	Unit      string `json:"unit"`
+	Quota     *struct {
+		Remaining any    `json:"remaining"`
+		Unit      string `json:"unit"`
+	} `json:"quota"`
+	IsActive *bool `json:"is_active"`
+	IsValid  *bool `json:"isValid"`
+}
+
 // GetAuthHeader get auth header
 func GetAuthHeader(token string) http.Header {
 	h := http.Header{}
@@ -164,6 +177,74 @@ func GetResponseBody(method, url string, channel *model.Channel, headers http.He
 		return nil, err
 	}
 	return body, nil
+}
+
+func updateChannelCompatibleUsageBalance(channel *model.Channel) (float64, error) {
+	url := buildCompatibleUsageBalanceURL(channel.GetBaseURL())
+	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
+	if err != nil {
+		return 0, err
+	}
+	response := CompatibleUsageBalanceResponse{}
+	err = common.Unmarshal(body, &response)
+	if err != nil {
+		return 0, err
+	}
+	balance, err := getCompatibleUsageBalance(response)
+	if err != nil {
+		return 0, err
+	}
+	channel.UpdateBalance(balance)
+	return balance, nil
+}
+
+func buildCompatibleUsageBalanceURL(baseURL string) string {
+	trimmedBaseURL := strings.TrimRight(baseURL, "/")
+	if strings.HasSuffix(strings.ToLower(trimmedBaseURL), "/v1") {
+		return fmt.Sprintf("%s/usage", trimmedBaseURL)
+	}
+	return fmt.Sprintf("%s/v1/usage", trimmedBaseURL)
+}
+
+func getCompatibleUsageBalance(response CompatibleUsageBalanceResponse) (float64, error) {
+	if response.IsActive != nil && !*response.IsActive {
+		return 0, errors.New("usage account is inactive")
+	}
+	if response.IsValid != nil && !*response.IsValid {
+		return 0, errors.New("usage account is invalid")
+	}
+
+	if balance, ok, err := parseCompatibleBalanceValue(response.Remaining); ok || err != nil {
+		return balance, err
+	}
+	if response.Quota != nil {
+		if balance, ok, err := parseCompatibleBalanceValue(response.Quota.Remaining); ok || err != nil {
+			return balance, err
+		}
+	}
+	if balance, ok, err := parseCompatibleBalanceValue(response.Balance); ok || err != nil {
+		return balance, err
+	}
+
+	return 0, errors.New("missing remaining balance")
+}
+
+func parseCompatibleBalanceValue(value any) (float64, bool, error) {
+	switch typed := value.(type) {
+	case nil:
+		return 0, false, nil
+	case float64:
+		return typed, true, nil
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0, false, nil
+		}
+		balance, err := strconv.ParseFloat(trimmed, 64)
+		return balance, true, err
+	default:
+		return 0, true, fmt.Errorf("unsupported balance value type: %T", value)
+	}
 }
 
 func updateChannelCloseAIBalance(channel *model.Channel) (float64, error) {
@@ -370,6 +451,8 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
 		return 0, errors.New("尚未实现")
 	case constant.ChannelTypeCustom:
 		baseURL = channel.GetBaseURL()
+	case constant.ChannelTypeAnthropic:
+		return updateChannelCompatibleUsageBalance(channel)
 	//case common.ChannelTypeOpenAISB:
 	//	return updateChannelOpenAISBBalance(channel)
 	case constant.ChannelTypeAIProxy:
@@ -393,6 +476,11 @@ func updateChannelBalance(channel *model.Channel) (float64, error) {
 
 	body, err := GetResponseBody("GET", url, channel, GetAuthHeader(channel.Key))
 	if err != nil {
+		if channel.Type == constant.ChannelTypeCustom || channel.Type == constant.ChannelTypeOpenAI {
+			if balance, fallbackErr := updateChannelCompatibleUsageBalance(channel); fallbackErr == nil {
+				return balance, nil
+			}
+		}
 		return 0, err
 	}
 	subscription := OpenAISubscriptionResponse{}
