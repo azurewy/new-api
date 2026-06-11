@@ -280,6 +280,8 @@ func SetApiRouter(router *gin.Engine) {
 			tokenRoute.POST("/batch", controller.DeleteTokenBatch)
 			tokenRoute.POST("/batch/keys", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.GetTokenKeysBatch)
 		}
+		apiRouter.POST("/admin/token/provision", middleware.AdminAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.ProvisionUserToken)
+		apiRouter.POST("/admin/wzcon/groups/sync", middleware.AdminAuth(), middleware.CriticalRateLimit(), middleware.DisableCache(), controller.SyncWZConGroupEntitlement)
 
 		usageRoute := apiRouter.Group("/usage")
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())

@@ -42,27 +42,35 @@ type tokenKeyResponse struct {
 	Key string `json:"key"`
 }
 
+type tokenProvisionResponse struct {
+	ID     int    `json:"id"`
+	UserID int    `json:"user_id"`
+	Name   string `json:"name"`
+	Key    string `json:"key"`
+	Status int    `json:"status"`
+}
+
 type sqliteColumnInfo struct {
 	Name string `gorm:"column:name"`
 	Type string `gorm:"column:type"`
 }
 
 type legacyToken struct {
-	Id                 int            `gorm:"primaryKey"`
-	UserId             int            `gorm:"index"`
-	Key                string         `gorm:"column:key;type:char(48);uniqueIndex"`
-	Status             int            `gorm:"default:1"`
-	Name               string         `gorm:"index"`
-	CreatedTime        int64          `gorm:"bigint"`
-	AccessedTime       int64          `gorm:"bigint"`
-	ExpiredTime        int64          `gorm:"bigint;default:-1"`
-	RemainQuota        int            `gorm:"default:0"`
+	Id                 int    `gorm:"primaryKey"`
+	UserId             int    `gorm:"index"`
+	Key                string `gorm:"column:key;type:char(48);uniqueIndex"`
+	Status             int    `gorm:"default:1"`
+	Name               string `gorm:"index"`
+	CreatedTime        int64  `gorm:"bigint"`
+	AccessedTime       int64  `gorm:"bigint"`
+	ExpiredTime        int64  `gorm:"bigint;default:-1"`
+	RemainQuota        int    `gorm:"default:0"`
 	UnlimitedQuota     bool
 	ModelLimitsEnabled bool
-	ModelLimits        string         `gorm:"type:text"`
-	AllowIps           *string        `gorm:"default:''"`
-	UsedQuota          int            `gorm:"default:0"`
-	Group              string         `gorm:"column:group;default:''"`
+	ModelLimits        string  `gorm:"type:text"`
+	AllowIps           *string `gorm:"default:''"`
+	UsedQuota          int     `gorm:"default:0"`
+	Group              string  `gorm:"column:group;default:''"`
 	CrossGroupRetry    bool
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 }
@@ -537,5 +545,58 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 	}
 	if strings.Contains(unauthorizedRecorder.Body.String(), token.Key) {
 		t.Fatalf("unauthorized key response leaked raw token key: %s", unauthorizedRecorder.Body.String())
+	}
+}
+
+func TestProvisionUserTokenCreatesTokenOwnedByTargetUserAndReturnsFullKey(t *testing.T) {
+	db := setupTokenControllerTestDB(t)
+
+	ctx, recorder := newAuthenticatedContext(t, http.MethodPost, "/api/admin/token/provision", gin.H{
+		"user_id":              42,
+		"name":                 "WZCon IDE Provider",
+		"purpose":              "ide-provider",
+		"models":               []string{"gpt-4.1-mini", "qwen-plus"},
+		"group":                "wzcon_pro",
+		"unlimited_quota":      true,
+		"model_limits_enabled": true,
+	}, 1)
+	ctx.Set("role", common.RoleAdminUser)
+
+	ProvisionUserToken(ctx)
+
+	response := decodeAPIResponse(t, recorder)
+	if !response.Success {
+		t.Fatalf("expected provision to succeed, got message: %s", response.Message)
+	}
+
+	var provision tokenProvisionResponse
+	if err := common.Unmarshal(response.Data, &provision); err != nil {
+		t.Fatalf("failed to decode provision response: %v", err)
+	}
+	if provision.ID == 0 {
+		t.Fatalf("expected provision response token id, got %#v", provision)
+	}
+	if provision.UserID != 42 {
+		t.Fatalf("expected provision response user_id 42, got %#v", provision)
+	}
+	if provision.Key == "" || strings.Contains(provision.Key, "*") {
+		t.Fatalf("expected provision response to include full key, got %#v", provision)
+	}
+	if provision.Name != "WZCon IDE Provider" || provision.Status != common.TokenStatusEnabled {
+		t.Fatalf("unexpected provision response: %#v", provision)
+	}
+
+	var stored model.Token
+	if err := db.First(&stored, provision.ID).Error; err != nil {
+		t.Fatalf("failed to load provisioned token: %v", err)
+	}
+	if stored.UserId != 42 {
+		t.Fatalf("expected stored token user_id 42, got %d", stored.UserId)
+	}
+	if stored.Key != provision.Key {
+		t.Fatalf("expected stored key to match returned key")
+	}
+	if stored.ModelLimits != "gpt-4.1-mini,qwen-plus" || !stored.ModelLimitsEnabled {
+		t.Fatalf("expected model limits to be stored, got enabled=%v limits=%q", stored.ModelLimitsEnabled, stored.ModelLimits)
 	}
 }

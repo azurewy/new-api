@@ -171,46 +171,116 @@ func AddToken(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if _, ok := createUserToken(c, c.GetInt("id"), token); !ok {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+	})
+}
+
+type provisionUserTokenRequest struct {
+	UserId             int      `json:"user_id"`
+	Name               string   `json:"name"`
+	Purpose            string   `json:"purpose"`
+	Models             []string `json:"models"`
+	ExpiredTime        int64    `json:"expired_time"`
+	RemainQuota        int      `json:"remain_quota"`
+	UnlimitedQuota     bool     `json:"unlimited_quota"`
+	ModelLimitsEnabled bool     `json:"model_limits_enabled"`
+	ModelLimits        string   `json:"model_limits"`
+	AllowIps           *string  `json:"allow_ips"`
+	Group              string   `json:"group"`
+	CrossGroupRetry    bool     `json:"cross_group_retry"`
+}
+
+func ProvisionUserToken(c *gin.Context) {
+	request := provisionUserTokenRequest{}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if request.UserId <= 0 {
+		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
+		return
+	}
+	modelLimits := strings.TrimSpace(request.ModelLimits)
+	if modelLimits == "" && len(request.Models) > 0 {
+		modelLimits = joinModelLimits(request.Models)
+	}
+	token := model.Token{
+		Name:               request.Name,
+		ExpiredTime:        request.ExpiredTime,
+		RemainQuota:        request.RemainQuota,
+		UnlimitedQuota:     request.UnlimitedQuota,
+		ModelLimitsEnabled: request.ModelLimitsEnabled || modelLimits != "",
+		ModelLimits:        modelLimits,
+		AllowIps:           request.AllowIps,
+		Group:              request.Group,
+		CrossGroupRetry:    request.CrossGroupRetry,
+	}
+	cleanToken, ok := createUserToken(c, request.UserId, token)
+	if !ok {
+		return
+	}
+	common.ApiSuccess(c, gin.H{
+		"id":                   cleanToken.Id,
+		"user_id":              cleanToken.UserId,
+		"name":                 cleanToken.Name,
+		"key":                  cleanToken.GetFullKey(),
+		"status":               cleanToken.Status,
+		"expired_time":         cleanToken.ExpiredTime,
+		"remain_quota":         cleanToken.RemainQuota,
+		"unlimited_quota":      cleanToken.UnlimitedQuota,
+		"model_limits_enabled": cleanToken.ModelLimitsEnabled,
+		"model_limits":         cleanToken.ModelLimits,
+		"group":                cleanToken.Group,
+	})
+}
+
+func createUserToken(c *gin.Context, userId int, token model.Token) (*model.Token, bool) {
 	if len(token.Name) > 50 {
 		common.ApiErrorI18n(c, i18n.MsgTokenNameTooLong)
-		return
+		return nil, false
 	}
 	// 非无限额度时，检查额度值是否超出有效范围
 	if !token.UnlimitedQuota {
 		if token.RemainQuota < 0 {
 			common.ApiErrorI18n(c, i18n.MsgTokenQuotaNegative)
-			return
+			return nil, false
 		}
 		maxQuotaValue := int((1000000000 * common.QuotaPerUnit))
 		if token.RemainQuota > maxQuotaValue {
 			common.ApiErrorI18n(c, i18n.MsgTokenQuotaExceedMax, map[string]any{"Max": maxQuotaValue})
-			return
+			return nil, false
 		}
 	}
 	// 检查用户令牌数量是否已达上限
 	maxTokens := operation_setting.GetMaxUserTokens()
-	count, err := model.CountUserTokens(c.GetInt("id"))
+	count, err := model.CountUserTokens(userId)
 	if err != nil {
 		common.ApiError(c, err)
-		return
+		return nil, false
 	}
 	if int(count) >= maxTokens {
 		c.JSON(http.StatusOK, gin.H{
 			"success": false,
 			"message": fmt.Sprintf("已达到最大令牌数量限制 (%d)", maxTokens),
 		})
-		return
+		return nil, false
 	}
 	key, err := common.GenerateKey()
 	if err != nil {
 		common.ApiErrorI18n(c, i18n.MsgTokenGenerateFailed)
 		common.SysLog("failed to generate token key: " + err.Error())
-		return
+		return nil, false
 	}
 	cleanToken := model.Token{
-		UserId:             c.GetInt("id"),
+		UserId:             userId,
 		Name:               token.Name,
 		Key:                key,
+		Status:             common.TokenStatusEnabled,
 		CreatedTime:        common.GetTimestamp(),
 		AccessedTime:       common.GetTimestamp(),
 		ExpiredTime:        token.ExpiredTime,
@@ -225,12 +295,20 @@ func AddToken(c *gin.Context) {
 	err = cleanToken.Insert()
 	if err != nil {
 		common.ApiError(c, err)
-		return
+		return nil, false
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-	})
+	return &cleanToken, true
+}
+
+func joinModelLimits(models []string) string {
+	limits := make([]string, 0, len(models))
+	for _, item := range models {
+		modelName := strings.TrimSpace(item)
+		if modelName != "" {
+			limits = append(limits, modelName)
+		}
+	}
+	return strings.Join(limits, ",")
 }
 
 func DeleteToken(c *gin.Context) {
