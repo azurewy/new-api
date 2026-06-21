@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,11 +177,29 @@ type SubscriptionPlan struct {
 	TotalAmount int64 `json:"total_amount" gorm:"type:bigint;not null;default:0"`
 
 	// Quota reset period for plan
-	QuotaResetPeriod        string `json:"quota_reset_period" gorm:"type:varchar(16);default:'never'"`
-	QuotaResetCustomSeconds int64  `json:"quota_reset_custom_seconds" gorm:"type:bigint;default:0"`
+	QuotaResetPeriod         string `json:"quota_reset_period" gorm:"type:varchar(16);default:'never'"`
+	QuotaResetCustomSeconds  int64  `json:"quota_reset_custom_seconds" gorm:"type:bigint;default:0"`
+	QuotaPolicyJSON          string `json:"quota_policy" gorm:"column:quota_policy;type:text"`
+	QuotaPolicy5HAmount      int64  `json:"quota_policy_5h_amount" gorm:"-"`
+	QuotaPolicy7DAmount      int64  `json:"quota_policy_7d_amount" gorm:"-"`
+	QuotaPolicyMonthlyAmount int64  `json:"quota_policy_monthly_amount" gorm:"-"`
 
 	CreatedAt int64 `json:"created_at" gorm:"bigint"`
 	UpdatedAt int64 `json:"updated_at" gorm:"bigint"`
+}
+
+type SubscriptionQuotaPolicy struct {
+	Mode   string                   `json:"mode"`
+	Unit   string                   `json:"unit"`
+	Limits []SubscriptionQuotaLimit `json:"limits"`
+}
+
+type SubscriptionQuotaLimit struct {
+	Key           string `json:"key"`
+	Name          string `json:"name"`
+	Amount        int64  `json:"amount"`
+	WindowSeconds int64  `json:"window_seconds"`
+	Reset         string `json:"reset"`
 }
 
 func (p *SubscriptionPlan) BeforeCreate(tx *gorm.DB) error {
@@ -198,6 +217,27 @@ func (p *SubscriptionPlan) BeforeUpdate(tx *gorm.DB) error {
 func (p *SubscriptionPlan) NormalizeDefaults() {
 	if p.AllowBalancePay == nil {
 		p.AllowBalancePay = common.GetPointer(true)
+	}
+	p.NormalizeManagedQuotaPolicyAmounts()
+}
+
+func (p *SubscriptionPlan) NormalizeManagedQuotaPolicyAmounts() {
+	p.QuotaPolicy5HAmount = 0
+	p.QuotaPolicy7DAmount = 0
+	p.QuotaPolicyMonthlyAmount = 0
+	policy, err := parseSubscriptionQuotaPolicy(p)
+	if err != nil || policy == nil {
+		return
+	}
+	for _, limit := range policy.Limits {
+		switch limit.Key {
+		case "5h":
+			p.QuotaPolicy5HAmount = limit.Amount
+		case "7d":
+			p.QuotaPolicy7DAmount = limit.Amount
+		case "monthly":
+			p.QuotaPolicyMonthlyAmount = limit.Amount
+		}
 	}
 }
 
@@ -278,7 +318,16 @@ func (s *UserSubscription) BeforeUpdate(tx *gorm.DB) error {
 }
 
 type SubscriptionSummary struct {
-	Subscription *UserSubscription `json:"subscription"`
+	Subscription      *UserSubscription               `json:"subscription"`
+	QuotaPolicyStatus []SubscriptionQuotaPolicyStatus `json:"quota_policy_status,omitempty"`
+}
+
+type SubscriptionQuotaPolicyStatus struct {
+	Key       string `json:"key"`
+	Name      string `json:"name"`
+	Used      int64  `json:"used"`
+	Amount    int64  `json:"amount"`
+	ResetTime int64  `json:"reset_time"`
 }
 
 func calcPlanEndTime(start time.Time, plan *SubscriptionPlan) (int64, error) {
@@ -292,7 +341,7 @@ func calcPlanEndTime(start time.Time, plan *SubscriptionPlan) (int64, error) {
 	case SubscriptionDurationYear:
 		return start.AddDate(plan.DurationValue, 0, 0).Unix(), nil
 	case SubscriptionDurationMonth:
-		return start.AddDate(0, plan.DurationValue, 0).Unix(), nil
+		return addNaturalMonthsClamped(start, plan.DurationValue).Unix(), nil
 	case SubscriptionDurationDay:
 		return start.Add(time.Duration(plan.DurationValue) * 24 * time.Hour).Unix(), nil
 	case SubscriptionDurationHour:
@@ -340,9 +389,7 @@ func calcNextResetTime(base time.Time, plan *SubscriptionPlan, endUnix int64) in
 		next = time.Date(base.Year(), base.Month(), base.Day(), 0, 0, 0, 0, base.Location()).
 			AddDate(0, 0, daysUntil)
 	case SubscriptionResetMonthly:
-		// Align to first day of next month 00:00
-		next = time.Date(base.Year(), base.Month(), 1, 0, 0, 0, 0, base.Location()).
-			AddDate(0, 1, 0)
+		next = addNaturalMonthsClamped(base, 1)
 	case SubscriptionResetCustom:
 		if plan.QuotaResetCustomSeconds <= 0 {
 			return 0
@@ -357,6 +404,57 @@ func calcNextResetTime(base time.Time, plan *SubscriptionPlan, endUnix int64) in
 	return next.Unix()
 }
 
+func calcNextResetTimeForSubscription(sub *UserSubscription, plan *SubscriptionPlan, now int64) int64 {
+	if sub == nil || plan == nil {
+		return 0
+	}
+	if NormalizeResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetMonthly {
+		return calcNextMonthlyBillingResetTime(sub.StartTime, now, sub.EndTime)
+	}
+	baseUnix := sub.LastResetTime
+	if baseUnix <= 0 {
+		baseUnix = sub.StartTime
+	}
+	return calcNextResetTime(time.Unix(baseUnix, 0), plan, sub.EndTime)
+}
+
+func calcNextMonthlyBillingResetTime(startUnix int64, nowUnix int64, endUnix int64) int64 {
+	if startUnix <= 0 {
+		return 0
+	}
+	if nowUnix < startUnix {
+		return startUnix
+	}
+	start := time.Unix(startUnix, 0)
+	for months := 1; months <= 240; months++ {
+		next := addNaturalMonthsClamped(start, months).Unix()
+		if endUnix > 0 && next > endUnix {
+			return 0
+		}
+		if next > nowUnix {
+			return next
+		}
+	}
+	return 0
+}
+
+func addNaturalMonthsClamped(base time.Time, months int) time.Time {
+	monthIndex := int(base.Month()) - 1 + months
+	targetYear := base.Year() + monthIndex/12
+	targetMonthIndex := monthIndex % 12
+	if targetMonthIndex < 0 {
+		targetMonthIndex += 12
+		targetYear--
+	}
+	targetMonth := time.Month(targetMonthIndex + 1)
+	lastDay := time.Date(targetYear, targetMonth+1, 0, base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location()).Day()
+	day := base.Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(targetYear, targetMonth, day, base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), base.Location())
+}
+
 func GetSubscriptionPlanById(id int) (*SubscriptionPlan, error) {
 	return getSubscriptionPlanByIdTx(nil, id)
 }
@@ -366,7 +464,7 @@ func getSubscriptionPlanByIdTx(tx *gorm.DB, id int) (*SubscriptionPlan, error) {
 		return nil, errors.New("invalid plan id")
 	}
 	key := subscriptionPlanCacheKey(id)
-	if key != "" {
+	if tx == nil && key != "" {
 		if cached, found, err := getSubscriptionPlanCache().Get(key); err == nil && found {
 			cached.NormalizeDefaults()
 			return &cached, nil
@@ -374,6 +472,7 @@ func getSubscriptionPlanByIdTx(tx *gorm.DB, id int) (*SubscriptionPlan, error) {
 	}
 	var plan SubscriptionPlan
 	query := DB
+	cacheEnabled := tx == nil
 	if tx != nil {
 		query = tx
 	}
@@ -381,7 +480,9 @@ func getSubscriptionPlanByIdTx(tx *gorm.DB, id int) (*SubscriptionPlan, error) {
 		return nil, err
 	}
 	plan.NormalizeDefaults()
-	_ = getSubscriptionPlanCache().SetWithTTL(key, plan, subscriptionPlanCacheTTL())
+	if cacheEnabled {
+		_ = getSubscriptionPlanCache().SetWithTTL(key, plan, subscriptionPlanCacheTTL())
+	}
 	return &plan, nil
 }
 
@@ -447,6 +548,46 @@ func downgradeUserGroupForSubscriptionTx(tx *gorm.DB, sub *UserSubscription, now
 	return prevGroup, nil
 }
 
+func refreshActiveUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *SubscriptionPlan) (bool, error) {
+	if tx == nil || plan == nil || userId <= 0 || plan.Id <= 0 {
+		return false, nil
+	}
+	now := time.Now().Unix()
+	var sub UserSubscription
+	query := tx.Set("gorm:query_option", "FOR UPDATE").
+		Where("user_id = ? AND plan_id = ? AND status = ? AND end_time > ?", userId, plan.Id, "active", now).
+		Order("end_time desc, id desc").
+		Limit(1).
+		Find(&sub)
+	if query.Error != nil {
+		return false, query.Error
+	}
+	if query.RowsAffected == 0 {
+		return false, nil
+	}
+	sub.AmountTotal = plan.TotalAmount
+	if sub.AmountTotal > 0 && sub.AmountUsed > sub.AmountTotal {
+		sub.AmountUsed = sub.AmountTotal
+	}
+	if strings.TrimSpace(plan.UpgradeGroup) != "" {
+		sub.UpgradeGroup = strings.TrimSpace(plan.UpgradeGroup)
+	}
+	if NormalizeResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetNever {
+		sub.LastResetTime = 0
+		sub.NextResetTime = 0
+	} else if sub.NextResetTime == 0 {
+		next := calcNextResetTimeForSubscription(&sub, plan, now)
+		if next > 0 {
+			sub.LastResetTime = sub.StartTime
+			sub.NextResetTime = next
+		}
+	}
+	if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
+		return false, err
+	}
+	return true, tx.Save(&sub).Error
+}
+
 func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *SubscriptionPlan, source string) (*UserSubscription, error) {
 	if tx == nil {
 		return nil, errors.New("tx is nil")
@@ -510,6 +651,12 @@ func CreateUserSubscriptionFromPlanTx(tx *gorm.DB, userId int, plan *Subscriptio
 		PrevUserGroup: prevGroup,
 		CreatedAt:     common.GetTimestamp(),
 		UpdatedAt:     common.GetTimestamp(),
+	}
+	if NormalizeResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetMonthly {
+		sub.NextResetTime = calcNextMonthlyBillingResetTime(sub.StartTime, sub.StartTime, sub.EndTime)
+		if sub.NextResetTime > 0 {
+			sub.LastResetTime = sub.StartTime
+		}
 	}
 	if err := tx.Create(sub).Error; err != nil {
 		return nil, err
@@ -663,6 +810,11 @@ func AdminBindSubscription(userId int, planId int, sourceNote string) (string, e
 		return "", err
 	}
 	err = DB.Transaction(func(tx *gorm.DB) error {
+		if refreshed, err := refreshActiveUserSubscriptionFromPlanTx(tx, userId, plan); err != nil {
+			return err
+		} else if refreshed {
+			return nil
+		}
 		_, err := CreateUserSubscriptionFromPlanTx(tx, userId, plan, "admin")
 		return err
 	})
@@ -830,14 +982,73 @@ func buildSubscriptionSummaries(subs []UserSubscription) []SubscriptionSummary {
 	if len(subs) == 0 {
 		return []SubscriptionSummary{}
 	}
+	planCache := map[int]*SubscriptionPlan{}
+	now := common.GetTimestamp()
 	result := make([]SubscriptionSummary, 0, len(subs))
 	for _, sub := range subs {
 		subCopy := sub
+		statuses := []SubscriptionQuotaPolicyStatus{}
+		if sub.PlanId > 0 {
+			plan, ok := planCache[sub.PlanId]
+			if !ok {
+				var err error
+				plan, err = GetSubscriptionPlanById(sub.PlanId)
+				if err != nil {
+					plan = nil
+				}
+				planCache[sub.PlanId] = plan
+			}
+			if plan != nil {
+				statuses, _ = BuildSubscriptionQuotaPolicyStatus(&subCopy, plan, now)
+			}
+		}
 		result = append(result, SubscriptionSummary{
-			Subscription: &subCopy,
+			Subscription:      &subCopy,
+			QuotaPolicyStatus: statuses,
 		})
 	}
 	return result
+}
+
+func BuildSubscriptionQuotaPolicyStatus(sub *UserSubscription, plan *SubscriptionPlan, now int64) ([]SubscriptionQuotaPolicyStatus, error) {
+	if sub == nil || plan == nil {
+		return []SubscriptionQuotaPolicyStatus{}, nil
+	}
+	policy, err := parseSubscriptionQuotaPolicy(plan)
+	if err != nil || policy == nil {
+		return []SubscriptionQuotaPolicyStatus{}, err
+	}
+	statuses := make([]SubscriptionQuotaPolicyStatus, 0, len(policy.Limits))
+	for _, limit := range policy.Limits {
+		used, err := subscriptionQuotaPolicyUsedTx(DB, sub, limit, now)
+		if err != nil {
+			return nil, err
+		}
+		resetTime := int64(0)
+		if limit.Reset == "subscription_cycle" || limit.Key == "monthly" || limit.WindowSeconds <= 0 {
+			resetTime = sub.NextResetTime
+		} else {
+			start, end, err := subscriptionQuotaPolicyWindowTx(DB, sub, limit, now)
+			if err != nil {
+				return nil, err
+			}
+			if start > 0 {
+				resetTime = end
+			}
+		}
+		name := limit.Name
+		if strings.TrimSpace(name) == "" {
+			name = limit.Key
+		}
+		statuses = append(statuses, SubscriptionQuotaPolicyStatus{
+			Key:       limit.Key,
+			Name:      name,
+			Used:      used,
+			Amount:    limit.Amount,
+			ResetTime: resetTime,
+		})
+	}
+	return statuses, nil
 }
 
 // AdminInvalidateUserSubscription marks a user subscription as cancelled and ends it immediately.
@@ -1055,6 +1266,22 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 	if NormalizeResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetNever {
 		return nil
 	}
+	if NormalizeResetPeriod(plan.QuotaResetPeriod) == SubscriptionResetMonthly {
+		if sub.NextResetTime == 0 {
+			next := calcNextMonthlyBillingResetTime(sub.StartTime, now, sub.EndTime)
+			if next > 0 {
+				sub.NextResetTime = next
+				sub.LastResetTime = sub.StartTime
+				return tx.Save(sub).Error
+			}
+			return nil
+		}
+		sub.AmountUsed = 0
+		sub.LastResetTime = sub.NextResetTime
+		sub.NextResetTime = calcNextMonthlyBillingResetTime(sub.StartTime, now, sub.EndTime)
+		return tx.Save(sub).Error
+	}
+
 	baseUnix := sub.LastResetTime
 	if baseUnix <= 0 {
 		baseUnix = sub.StartTime
@@ -1079,6 +1306,338 @@ func maybeResetUserSubscriptionWithPlanTx(tx *gorm.DB, sub *UserSubscription, pl
 	sub.LastResetTime = base.Unix()
 	sub.NextResetTime = next
 	return tx.Save(sub).Error
+}
+
+func parseSubscriptionQuotaPolicy(plan *SubscriptionPlan) (*SubscriptionQuotaPolicy, error) {
+	if plan == nil || strings.TrimSpace(plan.QuotaPolicyJSON) == "" {
+		return nil, nil
+	}
+	var policy SubscriptionQuotaPolicy
+	if err := common.UnmarshalJsonStr(plan.QuotaPolicyJSON, &policy); err != nil {
+		return nil, err
+	}
+	normalized := &SubscriptionQuotaPolicy{
+		Mode: "all_limits_required",
+		Unit: "quota",
+	}
+	if strings.TrimSpace(policy.Mode) != "" {
+		normalized.Mode = strings.TrimSpace(policy.Mode)
+	}
+	if strings.TrimSpace(policy.Unit) != "" {
+		normalized.Unit = strings.TrimSpace(policy.Unit)
+	}
+	for _, limit := range policy.Limits {
+		key := strings.TrimSpace(limit.Key)
+		if key == "" || limit.Amount <= 0 {
+			continue
+		}
+		reset := strings.TrimSpace(limit.Reset)
+		if reset == "" {
+			reset = "rolling"
+		}
+		normalized.Limits = append(normalized.Limits, SubscriptionQuotaLimit{
+			Key:           key,
+			Name:          strings.TrimSpace(limit.Name),
+			Amount:        limit.Amount,
+			WindowSeconds: limit.WindowSeconds,
+			Reset:         reset,
+		})
+	}
+	if len(normalized.Limits) == 0 {
+		return nil, nil
+	}
+	return normalized, nil
+}
+
+func ValidateSubscriptionQuotaPolicyJSON(policyJSON string) error {
+	policyJSON = strings.TrimSpace(policyJSON)
+	if policyJSON == "" {
+		return nil
+	}
+	policy, err := parseSubscriptionQuotaPolicy(&SubscriptionPlan{QuotaPolicyJSON: policyJSON})
+	if err != nil {
+		return err
+	}
+	if policy == nil {
+		return errors.New("quota_policy has no valid limits")
+	}
+	return nil
+}
+
+func ensureSubscriptionQuotaPolicyAllowsTx(tx *gorm.DB, sub *UserSubscription, plan *SubscriptionPlan, now int64, delta int64) error {
+	if delta <= 0 {
+		return nil
+	}
+	policy, err := parseSubscriptionQuotaPolicy(plan)
+	if err != nil {
+		return err
+	}
+	if policy == nil {
+		return nil
+	}
+	for _, limit := range policy.Limits {
+		used, err := subscriptionQuotaPolicyUsedTx(tx, sub, limit, now)
+		if err != nil {
+			return err
+		}
+		if used+delta > limit.Amount {
+			name := limit.Name
+			if name == "" {
+				name = limit.Key
+			}
+			return fmt.Errorf("subscription quota insufficient, limit=%s used=%d need=%d total=%d", name, used, delta, limit.Amount)
+		}
+	}
+	return nil
+}
+
+func subscriptionQuotaPolicyUsedTx(tx *gorm.DB, sub *UserSubscription, limit SubscriptionQuotaLimit, now int64) (int64, error) {
+	if sub == nil {
+		return 0, errors.New("subscription is nil")
+	}
+	if limit.Reset == "subscription_cycle" || limit.Key == "monthly" || limit.WindowSeconds <= 0 {
+		return sub.AmountUsed, nil
+	}
+	start, end, err := subscriptionQuotaPolicyWindowTx(tx, sub, limit, now)
+	if err != nil {
+		return 0, err
+	}
+	if start <= 0 || end <= 0 || now < start {
+		return 0, nil
+	}
+	logUsed, settledRequestIds, err := subscriptionQuotaPolicyLogUsedTx(tx, sub, start, end)
+	if err != nil {
+		return 0, err
+	}
+	preConsumed, err := subscriptionQuotaPolicyPreConsumedTx(tx, sub, start, end, settledRequestIds)
+	if err != nil {
+		return 0, err
+	}
+	return logUsed + preConsumed, nil
+}
+
+func subscriptionQuotaPolicyWindowTx(tx *gorm.DB, sub *UserSubscription, limit SubscriptionQuotaLimit, now int64) (int64, int64, error) {
+	if limit.Key == "5h" {
+		firstUse, err := currentFiveHourQuotaPolicyWindowStartTx(tx, sub, limit.WindowSeconds, now)
+		if err != nil {
+			return 0, 0, err
+		}
+		if firstUse <= 0 {
+			return 0, 0, nil
+		}
+		if firstUse < sub.StartTime {
+			firstUse = sub.StartTime
+		}
+		elapsed := now - firstUse
+		if elapsed < 0 {
+			return firstUse, firstUse + limit.WindowSeconds, nil
+		}
+		bucket := elapsed / limit.WindowSeconds
+		start := firstUse + bucket*limit.WindowSeconds
+		return start, start + limit.WindowSeconds, nil
+	}
+
+	start, err := firstSubscriptionQuotaPolicyUseTimeTx(tx, sub)
+	if err != nil {
+		return 0, 0, err
+	}
+	if start <= 0 {
+		return 0, 0, nil
+	}
+	if start < sub.StartTime {
+		start = sub.StartTime
+	}
+	elapsed := now - start
+	if elapsed < 0 {
+		return start, start + limit.WindowSeconds, nil
+	}
+	bucket := elapsed / limit.WindowSeconds
+	windowStart := start + bucket*limit.WindowSeconds
+	return windowStart, windowStart + limit.WindowSeconds, nil
+}
+
+func currentFiveHourQuotaPolicyWindowStartTx(tx *gorm.DB, sub *UserSubscription, windowSeconds int64, now int64) (int64, error) {
+	if sub == nil {
+		return 0, errors.New("subscription is nil")
+	}
+	if windowSeconds <= 0 {
+		return 0, nil
+	}
+	times, err := subscriptionQuotaPolicyUseTimesTx(tx, sub, sub.StartTime, now)
+	if err != nil {
+		return 0, err
+	}
+	var windowStart int64
+	for _, usedAt := range times {
+		if windowStart <= 0 || usedAt >= windowStart+windowSeconds {
+			windowStart = usedAt
+		}
+	}
+	return windowStart, nil
+}
+
+func firstSubscriptionQuotaPolicyUseTimeTx(tx *gorm.DB, sub *UserSubscription) (int64, error) {
+	if sub == nil {
+		return 0, errors.New("subscription is nil")
+	}
+	var logs []Log
+	logQuery := LOG_DB
+	if tx != nil && LOG_DB == DB {
+		logQuery = tx
+	}
+	logRes := logQuery.Where("user_id = ? AND type = ? AND created_at >= ?", sub.UserId, LogTypeConsume, sub.StartTime).
+		Order("created_at asc").
+		Find(&logs)
+	if logRes.Error != nil {
+		return 0, logRes.Error
+	}
+	firstLogAt := int64(0)
+	for _, log := range logs {
+		other, err := common.StrToMap(log.Other)
+		if err != nil {
+			continue
+		}
+		if int64FromInterface(other["subscription_id"]) != int64(sub.Id) {
+			continue
+		}
+		firstLogAt = log.CreatedAt
+		break
+	}
+
+	var firstRecord SubscriptionPreConsumeRecord
+	recordQuery := DB
+	if tx != nil {
+		recordQuery = tx
+	}
+	recordRes := recordQuery.Where("user_subscription_id = ? AND status <> ? AND created_at >= ?", sub.Id, "refunded", sub.StartTime).
+		Order("created_at asc").
+		Limit(1).
+		Find(&firstRecord)
+	if recordRes.Error != nil {
+		return 0, recordRes.Error
+	}
+	firstRecordAt := int64(0)
+	if recordRes.RowsAffected > 0 {
+		firstRecordAt = firstRecord.CreatedAt
+	}
+
+	if firstLogAt <= 0 {
+		return firstRecordAt, nil
+	}
+	if firstRecordAt <= 0 || firstLogAt < firstRecordAt {
+		return firstLogAt, nil
+	}
+	return firstRecordAt, nil
+}
+
+func subscriptionQuotaPolicyUseTimesTx(tx *gorm.DB, sub *UserSubscription, start int64, end int64) ([]int64, error) {
+	var times []int64
+	var logs []Log
+	logQuery := LOG_DB
+	if tx != nil && LOG_DB == DB {
+		logQuery = tx
+	}
+	if err := logQuery.Where("user_id = ? AND type = ? AND created_at >= ? AND created_at <= ?", sub.UserId, LogTypeConsume, start, end).
+		Order("created_at asc").
+		Find(&logs).Error; err != nil {
+		return nil, err
+	}
+	for _, log := range logs {
+		other, err := common.StrToMap(log.Other)
+		if err != nil {
+			continue
+		}
+		if int64FromInterface(other["subscription_id"]) != int64(sub.Id) {
+			continue
+		}
+		times = append(times, log.CreatedAt)
+	}
+
+	var records []SubscriptionPreConsumeRecord
+	recordQuery := DB
+	if tx != nil {
+		recordQuery = tx
+	}
+	if err := recordQuery.Where("user_subscription_id = ? AND status <> ? AND created_at >= ? AND created_at <= ?", sub.Id, "refunded", start, end).
+		Order("created_at asc").
+		Find(&records).Error; err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		times = append(times, record.CreatedAt)
+	}
+	sort.Slice(times, func(i, j int) bool {
+		return times[i] < times[j]
+	})
+	return times, nil
+}
+
+func subscriptionQuotaPolicyLogUsedTx(tx *gorm.DB, sub *UserSubscription, start int64, end int64) (int64, map[string]struct{}, error) {
+	var logs []Log
+	logQuery := LOG_DB
+	if tx != nil && LOG_DB == DB {
+		logQuery = tx
+	}
+	if err := logQuery.Where("user_id = ? AND type = ? AND created_at >= ? AND created_at < ?", sub.UserId, LogTypeConsume, start, end).
+		Find(&logs).Error; err != nil {
+		return 0, nil, err
+	}
+	var used int64
+	settledRequestIds := map[string]struct{}{}
+	for _, log := range logs {
+		other, err := common.StrToMap(log.Other)
+		if err != nil {
+			continue
+		}
+		if int64FromInterface(other["subscription_id"]) != int64(sub.Id) {
+			continue
+		}
+		used += int64FromInterface(other["subscription_consumed"])
+		if strings.TrimSpace(log.RequestId) != "" {
+			settledRequestIds[log.RequestId] = struct{}{}
+		}
+	}
+	return used, settledRequestIds, nil
+}
+
+func subscriptionQuotaPolicyPreConsumedTx(tx *gorm.DB, sub *UserSubscription, start int64, end int64, settledRequestIds map[string]struct{}) (int64, error) {
+	var records []SubscriptionPreConsumeRecord
+	query := DB
+	if tx != nil {
+		query = tx
+	}
+	if err := query.Where("user_subscription_id = ? AND status <> ? AND created_at >= ? AND created_at < ?", sub.Id, "refunded", start, end).
+		Find(&records).Error; err != nil {
+		return 0, err
+	}
+	var used int64
+	for _, record := range records {
+		if _, ok := settledRequestIds[record.RequestId]; ok {
+			continue
+		}
+		used += record.PreConsumed
+	}
+	return used, nil
+}
+
+func int64FromInterface(value interface{}) int64 {
+	switch typed := value.(type) {
+	case int:
+		return int64(typed)
+	case int64:
+		return typed
+	case int32:
+		return int64(typed)
+	case float64:
+		return int64(typed)
+	case float32:
+		return int64(typed)
+	case string:
+		parsed, _ := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return parsed
+	default:
+		return 0
+	}
 }
 
 // PreConsumeUserSubscription pre-consumes from any active subscription total quota.
@@ -1143,6 +1702,9 @@ func PreConsumeUserSubscription(requestId string, userId int, modelName string, 
 				if remain < amount {
 					continue
 				}
+			}
+			if err := ensureSubscriptionQuotaPolicyAllowsTx(tx, &sub, plan, now, amount); err != nil {
+				continue
 			}
 			record := &SubscriptionPreConsumeRecord{
 				RequestId:          requestId,
@@ -1301,12 +1863,24 @@ func PostConsumeUserSubscriptionDelta(userSubscriptionId int, delta int64) error
 	if delta == 0 {
 		return nil
 	}
+	now := GetDBTimestamp()
 	return DB.Transaction(func(tx *gorm.DB) error {
 		var sub UserSubscription
 		if err := tx.Set("gorm:query_option", "FOR UPDATE").
 			Where("id = ?", userSubscriptionId).
 			First(&sub).Error; err != nil {
 			return err
+		}
+		if delta > 0 {
+			plan, err := getSubscriptionPlanByIdTx(tx, sub.PlanId)
+			if err == nil && plan != nil {
+				if err := maybeResetUserSubscriptionWithPlanTx(tx, &sub, plan, now); err != nil {
+					return err
+				}
+				if err := ensureSubscriptionQuotaPolicyAllowsTx(tx, &sub, plan, now, delta); err != nil {
+					return err
+				}
+			}
 		}
 		newUsed := sub.AmountUsed + delta
 		if newUsed < 0 {

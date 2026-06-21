@@ -64,6 +64,102 @@ const resetPeriodOptions = [
   { value: 'custom', label: '自定义(秒)' },
 ];
 
+const managedQuotaLimits = [
+  {
+    key: '5h',
+    name: '5 小时额度',
+    amountField: 'quota_policy_5h_amount',
+    window_seconds: 18000,
+    reset: 'rolling',
+  },
+  {
+    key: '7d',
+    name: '7 天额度',
+    amountField: 'quota_policy_7d_amount',
+    window_seconds: 604800,
+    reset: 'rolling',
+  },
+  {
+    key: 'monthly',
+    name: '月总额度',
+    amountField: 'quota_policy_monthly_amount',
+    window_seconds: 2592000,
+    reset: 'subscription_cycle',
+  },
+];
+
+const parseQuotaPolicy = (policyJSON) => {
+  const raw = policyJSON?.trim();
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+};
+
+const coerceQuotaAmount = (value) => {
+  const amount = Number(value || 0);
+  if (!Number.isFinite(amount) || amount <= 0) return 0;
+  return Math.round(amount);
+};
+
+const getManagedQuotaAmounts = (policyJSON) => {
+  const policy = parseQuotaPolicy(policyJSON);
+  const limits = Array.isArray(policy?.limits) ? policy.limits : [];
+  return managedQuotaLimits.reduce((acc, limit) => {
+    const match = limits.find((item) => item?.key === limit.key);
+    acc[limit.amountField] = coerceQuotaAmount(match?.amount);
+    return acc;
+  }, {});
+};
+
+const getPositiveQuotaAmount = (value) => {
+  const amount = coerceQuotaAmount(value);
+  return amount > 0 ? amount : undefined;
+};
+
+const buildManagedQuotaPolicyJSON = (policyJSON, amounts) => {
+  const rawPolicy = policyJSON?.trim() || '';
+  const existingPolicy = parseQuotaPolicy(policyJSON);
+  const existingLimits = Array.isArray(existingPolicy?.limits)
+    ? existingPolicy.limits
+    : [];
+  const managedKeys = new Set(managedQuotaLimits.map((limit) => limit.key));
+  const preservedLimits = existingLimits.filter(
+    (limit) => typeof limit?.key !== 'string' || !managedKeys.has(limit.key),
+  );
+  const managedLimits = managedQuotaLimits
+    .map((limit) => ({
+      key: limit.key,
+      name: limit.name,
+      amount: coerceQuotaAmount(amounts[limit.amountField]),
+      window_seconds: limit.window_seconds,
+      reset: limit.reset,
+    }))
+    .filter((limit) => limit.amount > 0);
+
+  const limits = [...preservedLimits, ...managedLimits];
+  if (limits.length === 0) return rawPolicy;
+
+  return JSON.stringify({
+    ...(existingPolicy || {}),
+    mode:
+      typeof existingPolicy?.mode === 'string' && existingPolicy.mode.trim()
+        ? existingPolicy.mode
+        : 'all_limits_required',
+    unit:
+      typeof existingPolicy?.unit === 'string' && existingPolicy.unit.trim()
+        ? existingPolicy.unit
+        : 'quota',
+    limits,
+  });
+};
+
 const AddEditSubscriptionModal = ({
   visible,
   handleClose,
@@ -78,7 +174,18 @@ const AddEditSubscriptionModal = ({
   const isMobile = useIsMobile();
   const formApiRef = useRef(null);
   const isEdit = editingPlan?.plan?.id !== undefined;
-  const formKey = isEdit ? `edit-${editingPlan?.plan?.id}` : 'create';
+  const currentPlan = editingPlan?.plan || {};
+  const formKey = isEdit
+    ? [
+        'edit',
+        currentPlan.id,
+        currentPlan.updated_at || 0,
+        currentPlan.quota_policy || '',
+        currentPlan.quota_policy_5h_amount || 0,
+        currentPlan.quota_policy_7d_amount || 0,
+        currentPlan.quota_policy_monthly_amount || 0,
+      ].join('-')
+    : 'create';
 
   const getInitValues = () => ({
     title: '',
@@ -90,6 +197,10 @@ const AddEditSubscriptionModal = ({
     custom_seconds: 0,
     quota_reset_period: 'never',
     quota_reset_custom_seconds: 0,
+    quota_policy: '',
+    quota_policy_5h_amount: 0,
+    quota_policy_7d_amount: 0,
+    quota_policy_monthly_amount: 0,
     enabled: true,
     sort_order: 0,
     max_purchase_per_user: 0,
@@ -103,6 +214,23 @@ const AddEditSubscriptionModal = ({
     const base = getInitValues();
     if (editingPlan?.plan?.id === undefined) return base;
     const p = editingPlan.plan || {};
+    const explicit5hAmount = getPositiveQuotaAmount(p.quota_policy_5h_amount);
+    const explicit7dAmount = getPositiveQuotaAmount(p.quota_policy_7d_amount);
+    const explicitMonthlyAmount = getPositiveQuotaAmount(
+      p.quota_policy_monthly_amount,
+    );
+    const quotaPolicyAmounts = {
+      ...getManagedQuotaAmounts(p.quota_policy),
+      ...(explicit5hAmount !== undefined
+        ? { quota_policy_5h_amount: explicit5hAmount }
+        : {}),
+      ...(explicit7dAmount !== undefined
+        ? { quota_policy_7d_amount: explicit7dAmount }
+        : {}),
+      ...(explicitMonthlyAmount !== undefined
+        ? { quota_policy_monthly_amount: explicitMonthlyAmount }
+        : {}),
+    };
     return {
       ...base,
       title: p.title || '',
@@ -114,6 +242,8 @@ const AddEditSubscriptionModal = ({
       custom_seconds: Number(p.custom_seconds || 0),
       quota_reset_period: p.quota_reset_period || 'never',
       quota_reset_custom_seconds: Number(p.quota_reset_custom_seconds || 0),
+      quota_policy: p.quota_policy || '',
+      ...quotaPolicyAmounts,
       enabled: p.enabled !== false,
       sort_order: Number(p.sort_order || 0),
       max_purchase_per_user: Number(p.max_purchase_per_user || 0),
@@ -148,9 +278,15 @@ const AddEditSubscriptionModal = ({
     }
     setLoading(true);
     try {
+      const {
+        quota_policy_5h_amount,
+        quota_policy_7d_amount,
+        quota_policy_monthly_amount,
+        ...planValues
+      } = values;
       const payload = {
         plan: {
-          ...values,
+          ...planValues,
           price_amount: Number(values.price_amount || 0),
           currency: 'USD',
           duration_value: Number(values.duration_value || 0),
@@ -160,6 +296,11 @@ const AddEditSubscriptionModal = ({
             values.quota_reset_period === 'custom'
               ? Number(values.quota_reset_custom_seconds || 0)
               : 0,
+          quota_policy: buildManagedQuotaPolicyJSON(values.quota_policy, {
+            quota_policy_5h_amount,
+            quota_policy_7d_amount,
+            quota_policy_monthly_amount,
+          }),
           sort_order: Number(values.sort_order || 0),
           max_purchase_per_user: Number(values.max_purchase_per_user || 0),
           total_amount: displayAmountToQuota(values.total_amount),
@@ -376,6 +517,56 @@ const AddEditSubscriptionModal = ({
                         field='enabled'
                         label={t('启用状态')}
                         size='large'
+                      />
+                    </Col>
+                  </Row>
+
+                  <Row gutter={12}>
+                    <Col span={24}>
+                      <Form.TextArea
+                        field='quota_policy'
+                        label={t('额度策略 JSON')}
+                        autosize={{ minRows: 6, maxRows: 12 }}
+                        placeholder='{"mode":"all_limits_required","unit":"quota","limits":[{"key":"5h","name":"5 小时额度","amount":1000000,"window_seconds":18000,"reset":"rolling"}]}'
+                        extraText={t(
+                          '可选。官网同步的多层套餐额度会写入这里；编辑已同步套餐时请保留这段 JSON。',
+                        )}
+                      />
+                    </Col>
+                  </Row>
+
+                  <div className='mt-4 mb-2 flex items-center justify-between'>
+                    <Text strong>{t('套餐额度控制')}</Text>
+                    <Text type='tertiary' size='small'>
+                      {t('任一层用完即不可调用')}
+                    </Text>
+                  </div>
+                  <Row gutter={12}>
+                    <Col span={8}>
+                      <Form.InputNumber
+                        field='quota_policy_5h_amount'
+                        label={t('5 小时额度')}
+                        min={0}
+                        precision={0}
+                        style={{ width: '100%' }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Form.InputNumber
+                        field='quota_policy_7d_amount'
+                        label={t('7 天额度')}
+                        min={0}
+                        precision={0}
+                        style={{ width: '100%' }}
+                      />
+                    </Col>
+                    <Col span={8}>
+                      <Form.InputNumber
+                        field='quota_policy_monthly_amount'
+                        label={t('月总额度')}
+                        min={0}
+                        precision={0}
+                        style={{ width: '100%' }}
                       />
                     </Col>
                   </Row>

@@ -112,10 +112,38 @@ export const useSubscriptionsData = () => {
     setShowEdit(true);
   };
 
-  const openEdit = (planRecord) => {
+  const openEdit = async (planRecord) => {
     setSheetPlacement('right');
-    setEditingPlan(planRecord);
-    setShowEdit(true);
+    const planId = planRecord?.plan?.id;
+    if (!planId) {
+      setEditingPlan(planRecord);
+      setShowEdit(true);
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const res = await API.get('/api/subscription/admin/plans', {
+        disableDuplicate: true,
+        params: { _ts: Date.now() },
+      });
+      if (res.data?.success) {
+        const next = res.data.data || [];
+        setAllPlans(next);
+        setEditingPlan(
+          next.find((item) => item?.plan?.id === planId) || planRecord,
+        );
+      } else {
+        setEditingPlan(planRecord);
+        showError(res.data?.message || t('加载失败'));
+      }
+    } catch (e) {
+      setEditingPlan(planRecord);
+      showError(t('请求失败'));
+    } finally {
+      setLoading(false);
+      setShowEdit(true);
+    }
   };
 
   // Initialize data on component mount

@@ -233,6 +233,46 @@ export function SubscriptionPlansCard({
     return Math.round((used / total) * 100)
   }
 
+  const renderQuotaPolicyStatus = (
+    sub: UserSubscriptionRecord,
+    isActive: boolean
+  ) => {
+    const statuses = Array.isArray(sub?.quota_policy_status)
+      ? sub.quota_policy_status
+      : []
+    if (!isActive || statuses.length === 0) return null
+
+    return (
+      <div className='mt-2 space-y-1'>
+        {statuses.map((status) => {
+          const amount = Number(status?.amount || 0)
+          const used = Number(status?.used || 0)
+          const resetTime = Number(status?.reset_time || 0)
+          return (
+            <div
+              key={status?.key || status?.name}
+              className='text-muted-foreground flex flex-wrap items-center justify-between gap-x-3 gap-y-1'
+            >
+              <span className='font-medium text-foreground/70'>
+                {t(status?.name || status?.key || 'Quota')}
+              </span>
+              <span>
+                {t('Used')} {formatQuota(used)} / {formatQuota(amount)}
+              </span>
+              {resetTime > 0 ? (
+                <span>
+                  {t('Reset Time')}: {new Date(resetTime * 1000).toLocaleString()}
+                </span>
+              ) : (
+                <span>{t('Starts after first use')}</span>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   if (loading) {
     return (
       <Card className='gap-0 overflow-hidden py-0'>
@@ -495,6 +535,7 @@ export function SubscriptionPlansCard({
                       {totalAmount > 0 && isActive && (
                         <Progress value={usagePercent} className='mt-2 h-1.5' />
                       )}
+                      {renderQuotaPolicyStatus(sub, isActive)}
                     </div>
                   )
                 })}

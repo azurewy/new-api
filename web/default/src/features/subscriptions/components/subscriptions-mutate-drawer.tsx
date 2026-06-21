@@ -51,6 +51,7 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
+import { Textarea } from '@/components/ui/textarea'
 import {
   SideDrawerSection,
   sideDrawerContentClassName,
@@ -479,6 +480,105 @@ export function SubscriptionsMutateDrawer({
                     </FormItem>
                   )}
                 />
+              </div>
+
+              <FormField
+                control={form.control}
+                name='quota_policy'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Quota Policy JSON')}</FormLabel>
+                    <FormControl>
+                      <Textarea
+                        {...field}
+                        rows={7}
+                        placeholder='{"mode":"all_limits_required","unit":"quota","limits":[{"key":"5h","name":"5 hour quota","amount":1000000,"window_seconds":18000,"reset":"rolling"}]}'
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Optional. WZCon sync writes multi-window subscription limits here. Keep this JSON when editing synced plans.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <div className='space-y-3'>
+                <div className='flex items-center justify-between gap-3'>
+                  <FormLabel>{t('Plan quota controls')}</FormLabel>
+                  <span className='text-muted-foreground text-xs'>
+                    {t('Any reached layer makes the subscription unavailable')}
+                  </span>
+                </div>
+                <div className='grid grid-cols-1 gap-3 sm:grid-cols-3'>
+                  <FormField
+                    control={form.control}
+                    name='quota_policy_5h_amount'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('5 hour quota')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type='number'
+                            min={0}
+                            step={1}
+                            onChange={(e) =>
+                              field.onChange(parseInt(e.target.value, 10) || 0)
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name='quota_policy_7d_amount'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('7 day quota')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type='number'
+                            min={0}
+                            step={1}
+                            onChange={(e) =>
+                              field.onChange(parseInt(e.target.value, 10) || 0)
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+
+                  <FormField
+                    control={form.control}
+                    name='quota_policy_monthly_amount'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Monthly quota')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            type='number'
+                            min={0}
+                            step={1}
+                            onChange={(e) =>
+                              field.onChange(parseInt(e.target.value, 10) || 0)
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                </div>
               </div>
             </SideDrawerSection>
 

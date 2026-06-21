@@ -251,6 +251,42 @@ const SubscriptionPlansCard = ({
     return Math.round((used / total) * 100);
   };
 
+  const renderQuotaPolicyStatus = (sub, isActive) => {
+    const statuses = Array.isArray(sub?.quota_policy_status)
+      ? sub.quota_policy_status
+      : [];
+    if (!isActive || statuses.length === 0) return null;
+
+    return (
+      <div className='space-y-1 mb-2'>
+        {statuses.map((status) => {
+          const amount = Number(status?.amount || 0);
+          const used = Number(status?.used || 0);
+          const resetTime = Number(status?.reset_time || 0);
+          return (
+            <div
+              key={status?.key || status?.name}
+              className='flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-gray-500'
+            >
+              <span className='font-medium text-gray-600'>
+                {t(status?.name || status?.key || '额度')}
+              </span>
+              <span>
+                {t('已用')} {renderQuota(used)} / {renderQuota(amount)}
+              </span>
+              {resetTime > 0 && (
+                <span>
+                  {t('重置时间')}:{' '}
+                  {new Date(resetTime * 1000).toLocaleString()}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
   const cardContent = (
     <>
       {/* 卡片头部 */}
@@ -442,14 +478,7 @@ const SubscriptionPlansCard = ({
                             (subscription?.end_time || 0) * 1000,
                           ).toLocaleString()}
                         </div>
-                        {isActive && subscription?.next_reset_time > 0 && (
-                          <div className='text-xs text-gray-500 mb-2'>
-                            {t('下一次重置')}:{' '}
-                            {new Date(
-                              subscription.next_reset_time * 1000,
-                            ).toLocaleString()}
-                          </div>
-                        )}
+                        {renderQuotaPolicyStatus(sub, isActive)}
                         <div className='text-xs text-gray-500 mb-2'>
                           {t('总额度')}:{' '}
                           {totalAmount > 0 ? (

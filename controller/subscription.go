@@ -182,6 +182,11 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorMsg(c, "总额度不能为负数")
 		return
 	}
+	req.Plan.QuotaPolicyJSON = strings.TrimSpace(req.Plan.QuotaPolicyJSON)
+	if err := model.ValidateSubscriptionQuotaPolicyJSON(req.Plan.QuotaPolicyJSON); err != nil {
+		common.ApiErrorMsg(c, "额度策略配置无效")
+		return
+	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
 	if req.Plan.UpgradeGroup != "" {
 		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.UpgradeGroup]; !ok {
@@ -249,6 +254,11 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 		common.ApiErrorMsg(c, "总额度不能为负数")
 		return
 	}
+	req.Plan.QuotaPolicyJSON = strings.TrimSpace(req.Plan.QuotaPolicyJSON)
+	if err := model.ValidateSubscriptionQuotaPolicyJSON(req.Plan.QuotaPolicyJSON); err != nil {
+		common.ApiErrorMsg(c, "额度策略配置无效")
+		return
+	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
 	if req.Plan.UpgradeGroup != "" {
 		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.UpgradeGroup]; !ok {
@@ -282,6 +292,7 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"upgrade_group":              req.Plan.UpgradeGroup,
 			"quota_reset_period":         req.Plan.QuotaResetPeriod,
 			"quota_reset_custom_seconds": req.Plan.QuotaResetCustomSeconds,
+			"quota_policy":               req.Plan.QuotaPolicyJSON,
 			"updated_at":                 common.GetTimestamp(),
 		}
 		if req.Plan.AllowBalancePay != nil {

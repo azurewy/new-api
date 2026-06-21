@@ -38,6 +38,10 @@ export const subscriptionPlanSchema = z.object({
   allow_balance_pay: z.boolean().optional().default(true),
   max_purchase_per_user: z.number(),
   total_amount: z.number(),
+  quota_policy: z.string().optional(),
+  quota_policy_5h_amount: z.number().optional(),
+  quota_policy_7d_amount: z.number().optional(),
+  quota_policy_monthly_amount: z.number().optional(),
   upgrade_group: z.string().optional(),
   stripe_price_id: z.string().optional(),
   creem_product_id: z.string().optional(),
@@ -69,8 +73,17 @@ export const userSubscriptionSchema = z.object({
 
 export type UserSubscription = z.infer<typeof userSubscriptionSchema>
 
+export interface SubscriptionQuotaPolicyStatus {
+  key: string
+  name: string
+  used: number
+  amount: number
+  reset_time: number
+}
+
 export interface UserSubscriptionRecord {
   subscription: UserSubscription
+  quota_policy_status?: SubscriptionQuotaPolicyStatus[]
 }
 
 // ============================================================================
