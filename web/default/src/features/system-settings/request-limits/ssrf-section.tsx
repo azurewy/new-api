@@ -393,7 +393,7 @@ export function SSRFSection({ defaultValues }: SSRFSectionProps) {
               <FormItem>
                 <FormLabel>{t('Allowed Ports')}</FormLabel>
                 <FormControl>
-                  <Input placeholder={t('80,443,8080')} {...field} />
+                  <Input placeholder={t('80,443,18081')} {...field} />
                 </FormControl>
                 <FormDescription>
                   {t(

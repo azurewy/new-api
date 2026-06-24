@@ -169,7 +169,7 @@ const SystemSetting = () => {
               const ports = item.value ? JSON.parse(item.value) : [];
               setAllowedPorts(Array.isArray(ports) ? ports : []);
             } catch (e) {
-              setAllowedPorts(['80', '443', '8080', '8443']);
+              setAllowedPorts(['80', '443', '18081', '8443']);
             }
             break;
           case 'PasswordLoginEnabled':
